@@ -100,6 +100,7 @@ def main() -> None:
 
     # The bf16 DiT occupies ~63 GB. Free it before loading either VAE or an
     # otherwise-valid H3 decode can OOM even on a 96 GB GPU.
+    model.unpatch_model(device_to=torch.device("cpu"))
     del model, guider, sampler, sigmas, latent, noise, conditioning
     gc.collect()
     comfy.model_management.unload_all_models()
