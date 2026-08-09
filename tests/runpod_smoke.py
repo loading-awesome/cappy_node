@@ -11,6 +11,7 @@ take the reuse branch. This is an execution test, not a quality setting.
 
 from __future__ import annotations
 
+import logging
 import os
 import sys
 
@@ -30,7 +31,7 @@ from comfy_extras.nodes_custom_sampler import (
     SamplerCustomAdvanced,
 )
 from comfy_extras.nodes_minimax_h3 import _empty_av_latent
-from cappy_node.h3_patch import patch_model
+from cappy_node.nodes import CappyMiniMaxH3AudioAwareCache
 
 
 def finite(name: str, value: torch.Tensor) -> None:
@@ -39,14 +40,18 @@ def finite(name: str, value: torch.Tensor) -> None:
 
 
 def main() -> None:
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     path = os.path.join(COMFY, "models", "diffusion_models", "minimax_h3_fl2va_bf16.safetensors")
     model = comfy.sd.load_diffusion_model(path)
     # H3 accepts pre-projected text rows. Random context avoids loading the
     # 51 GB text encoder while still exercising the production DiT forward.
     context = torch.randn((1, 16, 5120), dtype=torch.bfloat16)
     conditioning = [[context, {}]]
-    cached = patch_model(model, threshold=1.0, max_consecutive_reuses=5,
-                         cache_device="auto", trace="per_step")
+    # Exercise the public node entry point, not merely its implementation.
+    cached = CappyMiniMaxH3AudioAwareCache().patch(
+        model=model, relative_threshold=1.0, max_consecutive_reuses=5,
+        cache_device="auto", trace="per_step",
+    )[0]
     latent, _ = _empty_av_latent(width=256, height=256, length=17)
     noise = RandomNoise.execute(noise_seed=12345).result[0]
     sampler = KSamplerSelect.execute(sampler_name="res_multistep").result[0]
