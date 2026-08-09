@@ -1,0 +1,20 @@
+Cappy H3 Cache
+Copyright (C) 2026 Cappy contributors
+
+This package is licensed under the GNU Affero General Public License, version
+3 or (at your option) any later version. See LICENSE.
+
+Attribution
+-----------
+The MiniMax H3 forward interception and block-loop extension pattern was
+adapted from ComfyUI-UtilsCollection by silveroxides:
+https://github.com/silveroxides/ComfyUI-UtilsCollection
+Licensed AGPL-3.0.
+
+That project attributes its original MiniMax H3 cache heuristic to
+ComfyUI-MiniMaxH3-Cache by lihaoyun6:
+https://github.com/lihaoyun6/ComfyUI-MiniMaxH3-Cache
+Licensed GPL-3.0.
+
+Cappy's audio-aware first-block residual-probe policy is a modification made
+for this package. It must be validated for quality before use.
