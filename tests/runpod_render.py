@@ -60,6 +60,7 @@ def main() -> None:
     parser.add_argument("--length", type=int, default=49)
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=12345)
+    parser.add_argument("--latent-out", help="Save CPU latents and exit without VAE decode.")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger().setLevel(logging.INFO)
@@ -97,6 +98,10 @@ def main() -> None:
         video_latent.detach().cpu(), audio_latent.detach().cpu(),
     ))}
     del video_latent, audio_latent
+    if args.latent_out:
+        torch.save(result, args.latent_out)
+        print(f"CAPPY_SAMPLE_PASS cache={args.cache} seconds={time.monotonic() - started:.1f} latent={args.latent_out}")
+        return
 
     # The bf16 DiT occupies ~63 GB. Free it before loading either VAE or an
     # otherwise-valid H3 decode can OOM even on a 96 GB GPU.
