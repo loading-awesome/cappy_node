@@ -89,6 +89,12 @@ def main() -> None:
     video_latent, audio_latent = result["samples"].unbind()
     assert torch.isfinite(video_latent).all() and torch.isfinite(audio_latent).all()
 
+    # The bf16 DiT occupies ~63 GB. Free it before loading either VAE or an
+    # otherwise-valid H3 decode can OOM even on a 96 GB GPU.
+    del model, guider, sampler, sigmas, latent, noise, conditioning
+    gc.collect()
+    torch.cuda.empty_cache()
+
     vvae = comfy.sd.VAE(sd=comfy.utils.load_torch_file(
         os.path.join(COMFY, "models", "vae", "minimax_h3_video_vae_fp16.safetensors")))
     images = nodes.VAEDecode().decode(vae=vvae, samples=result)[0]
