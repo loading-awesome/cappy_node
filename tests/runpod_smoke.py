@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import sys
+from argparse import ArgumentParser
 
 COMFY = os.environ.get("COMFY_DIR", ".")
 sys.path.insert(0, COMFY)
@@ -23,6 +24,7 @@ os.chdir(COMFY)
 import torch
 
 import comfy.sd
+import folder_paths
 from comfy_extras.nodes_custom_sampler import (
     BasicGuider,
     BasicScheduler,
@@ -40,14 +42,29 @@ def finite(name: str, value: torch.Tensor) -> None:
 
 
 def main() -> None:
+    parser = ArgumentParser()
+    parser.add_argument("--real-conditioning", action="store_true",
+                        help="Load the H3 Qwen encoder instead of using random test context.")
+    args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger().setLevel(logging.INFO)
     path = os.path.join(COMFY, "models", "diffusion_models", "minimax_h3_fl2va_bf16.safetensors")
     model = comfy.sd.load_diffusion_model(path)
-    # H3 accepts pre-projected text rows. Random context avoids loading the
-    # 51 GB text encoder while still exercising the production DiT forward.
-    context = torch.randn((1, 16, 5120), dtype=torch.bfloat16)
-    conditioning = [[context, {}]]
+    if args.real_conditioning:
+        clip_path = os.path.join(COMFY, "models", "text_encoders", "qwen3vl_32b_minimax_h3_bf16.safetensors")
+        clip = comfy.sd.load_clip(ckpt_paths=[clip_path],
+                                  embedding_directory=folder_paths.get_folder_paths("embeddings"),
+                                  clip_type=comfy.sd.CLIPType.MINIMAX)
+        conditioning = clip.encode_from_tokens_scheduled(
+            clip.tokenize("A person speaks clearly to camera in a quiet studio."))
+        del clip
+        print("conditioning=real_qwen")
+    else:
+        # H3 accepts pre-projected text rows. Random context avoids loading the
+        # 51 GB text encoder while still exercising the production DiT forward.
+        context = torch.randn((1, 16, 5120), dtype=torch.bfloat16)
+        conditioning = [[context, {}]]
+        print("conditioning=random")
     # Exercise the public node entry point, not merely its implementation.
     cached = CappyMiniMaxH3AudioAwareCache().patch(
         model=model, relative_threshold=1.0, max_consecutive_reuses=5,
