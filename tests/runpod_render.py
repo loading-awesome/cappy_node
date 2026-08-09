@@ -53,6 +53,8 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
     parser.add_argument("--cache", action="store_true")
+    parser.add_argument("--weight-set", choices=("bf16", "pruned-int8"), default="bf16",
+                        help="Matched Comfy-Org H3 pair to load. Keep both arms on the same set.")
     parser.add_argument("--threshold", type=float, default=0.10)
     parser.add_argument("--cap", type=int, default=5)
     parser.add_argument("--width", type=int, default=864)
@@ -67,7 +69,18 @@ def main() -> None:
     os.makedirs(os.path.dirname(os.path.abspath(args.out)), exist_ok=True)
     started = time.monotonic()
 
-    clip_path = os.path.join(COMFY, "models", "text_encoders", "qwen3vl_32b_minimax_h3_bf16.safetensors")
+    weights = {
+        "bf16": (
+            "qwen3vl_32b_minimax_h3_bf16.safetensors",
+            "minimax_h3_fl2va_bf16.safetensors",
+        ),
+        "pruned-int8": (
+            "qwen3vl_32b_minimax_h3_int8_convrot.safetensors",
+            "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
+        ),
+    }
+    clip_name, dit_name = weights[args.weight_set]
+    clip_path = os.path.join(COMFY, "models", "text_encoders", clip_name)
     clip = comfy.sd.load_clip(ckpt_paths=[clip_path],
                               embedding_directory=folder_paths.get_folder_paths("embeddings"),
                               clip_type=comfy.sd.CLIPType.MINIMAX)
@@ -75,7 +88,7 @@ def main() -> None:
     del clip
     gc.collect()
 
-    dit_path = os.path.join(COMFY, "models", "diffusion_models", "minimax_h3_fl2va_bf16.safetensors")
+    dit_path = os.path.join(COMFY, "models", "diffusion_models", dit_name)
     model = comfy.sd.load_diffusion_model(dit_path)
     if args.cache:
         model = CappyMiniMaxH3AudioAwareCache().patch(
@@ -100,7 +113,7 @@ def main() -> None:
     del video_latent, audio_latent
     if args.latent_out:
         torch.save(result, args.latent_out)
-        print(f"CAPPY_SAMPLE_PASS cache={args.cache} seconds={time.monotonic() - started:.1f} latent={args.latent_out}")
+        print(f"CAPPY_SAMPLE_PASS weights={args.weight_set} cache={args.cache} seconds={time.monotonic() - started:.1f} latent={args.latent_out}")
         return
 
     # The bf16 DiT occupies ~63 GB. Free it before loading either VAE or an
@@ -122,7 +135,7 @@ def main() -> None:
     VideoFromComponents(VideoComponents(images=images.float().cpu(), audio=audio,
                                         frame_rate=Fraction(24))).save_to(
         args.out, format=VideoContainer.AUTO, codec=VideoCodec.AUTO)
-    print(f"CAPPY_RENDER_PASS cache={args.cache} seconds={time.monotonic() - started:.1f} out={args.out}")
+    print(f"CAPPY_RENDER_PASS weights={args.weight_set} cache={args.cache} seconds={time.monotonic() - started:.1f} out={args.out}")
 
 
 if __name__ == "__main__":
