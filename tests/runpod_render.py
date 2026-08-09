@@ -132,6 +132,9 @@ def main() -> None:
     avae = comfy.sd.VAE(sd=comfy.utils.load_torch_file(
         os.path.join(COMFY, "models", "vae", "minimax_h3_audio_vae_fp32.safetensors")))
     audio = VAEDecodeAudio.execute(vae=avae, samples=result).result[0]
+    # This direct harness is outside ComfyUI's normal no-grad execution path.
+    # The muxer converts the waveform to NumPy, which requires a detached tensor.
+    audio = {**audio, "waveform": audio["waveform"].detach()}
     VideoFromComponents(VideoComponents(images=images.float().cpu(), audio=audio,
                                         frame_rate=Fraction(24))).save_to(
         args.out, format=VideoContainer.AUTO, codec=VideoCodec.AUTO)
