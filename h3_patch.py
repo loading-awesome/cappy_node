@@ -131,10 +131,14 @@ class AudioAwareFirstBlockCache:
             state.last_timestep = timestep
             state.step_index += 1
 
+        # H3 blocks use in-place residual adds. Preserve an untouched input
+        # snapshot; otherwise `after_first - hidden_states` is identically zero
+        # because both names refer to the same mutated tensor.
+        input_snapshot = hidden_states.detach().clone()
         # The first block is never skipped: its residual is the decision probe.
-        after_first = run_h3_blocks(model, hidden_states, args["t_emb"], args["mod_segments"],
+        after_first = run_h3_blocks(model, hidden_states.clone(), args["t_emb"], args["mod_segments"],
                                     args["rope_freqs"], transformer_options, start=0, end=1)
-        probe = after_first - hidden_states
+        probe = after_first - input_snapshot
         audio_range = _first_range(segments, "audio")
         video_range = _first_range(segments, "video")
         whole_change = _relative_l1(probe, state.previous_probe)
@@ -155,11 +159,11 @@ class AudioAwareFirstBlockCache:
                      _format_change(whole_change), _format_change(audio_change),
                      _format_change(video_change), decision.consecutive_before)
         if decision.reuse:
-            return {"img": self._apply_residual(hidden_states, residual)}  # type: ignore[arg-type]
+            return {"img": self._apply_residual(input_snapshot, residual)}  # type: ignore[arg-type]
 
         output = run_h3_blocks(model, after_first, args["t_emb"], args["mod_segments"],
                                args["rope_freqs"], transformer_options, start=1)
-        self._store_residual(state, output - hidden_states)
+        self._store_residual(state, output - input_snapshot)
         return {"img": output}
 
 
