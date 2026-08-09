@@ -24,6 +24,8 @@ import torch
 
 import comfy.sd
 import comfy.utils
+import comfy.model_management
+import comfy.nested_tensor
 import folder_paths
 import nodes
 from comfy_api.latest._input_impl.video_types import VideoFromComponents
@@ -89,10 +91,18 @@ def main() -> None:
     video_latent, audio_latent = result["samples"].unbind()
     assert torch.isfinite(video_latent).all() and torch.isfinite(audio_latent).all()
 
+    # Keep only CPU copies of the sampled latents. The managed DiT and the VAE
+    # cannot coexist with decode activations inside 96 GB at this render size.
+    result = {"samples": comfy.nested_tensor.NestedTensor((
+        video_latent.detach().cpu(), audio_latent.detach().cpu(),
+    ))}
+    del video_latent, audio_latent
+
     # The bf16 DiT occupies ~63 GB. Free it before loading either VAE or an
     # otherwise-valid H3 decode can OOM even on a 96 GB GPU.
     del model, guider, sampler, sigmas, latent, noise, conditioning
     gc.collect()
+    comfy.model_management.unload_all_models()
     torch.cuda.empty_cache()
 
     vvae = comfy.sd.VAE(sd=comfy.utils.load_torch_file(
