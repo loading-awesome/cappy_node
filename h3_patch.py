@@ -309,10 +309,17 @@ def cappy_h3_forward(self: minimax_model.MiniMaxH3Model, x: list[torch.Tensor], 
     video_out = minimax_model.unpatchify_video(video_result, latent_t, lat_h // 2, lat_w // 2,
                                                 self.latents_dim, self.patch_size)[:, :, :orig_t, :orig_h, :orig_w]
     audio_out = minimax_model.unpack_audio(audio_result)
-    # ComfyUI's public H3 forward applies audio-schedule conversion outside
-    # _forward.  Keep this patched _forward aligned with that contract rather
-    # than calling a private/nonexistent time_shift_slope helper.
-    return [-video_out.to(video_x.dtype), -audio_out.to(audio_x.dtype)]
+    # H3's audio-output conversion moved across the public _forward boundary.
+    # v0.30.1 expects its local slope; newer Core handles it in forward().
+    # Supporting both avoids either an AttributeError or a silent audio-scale
+    # mismatch when a user updates ComfyUI.
+    time_shift_slope = getattr(minimax_model, "time_shift_slope", None)
+    if time_shift_slope is None:
+        audio_velocity = -audio_out.to(audio_x.dtype)
+    else:
+        slope_a = time_shift_slope(sigma_v, shift_v, shift_a).to(audio_out.dtype)
+        audio_velocity = (-slope_a) * audio_out.to(audio_x.dtype)
+    return [-video_out.to(video_x.dtype), audio_velocity]
 
 
 def patch_model(model: Any, threshold: float, max_consecutive_reuses: int,
