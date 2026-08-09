@@ -41,6 +41,7 @@ def finite(name: str, value: torch.Tensor) -> None:
 
 def main() -> None:
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    logging.getLogger().setLevel(logging.INFO)
     path = os.path.join(COMFY, "models", "diffusion_models", "minimax_h3_fl2va_bf16.safetensors")
     model = comfy.sd.load_diffusion_model(path)
     # H3 accepts pre-projected text rows. Random context avoids loading the
