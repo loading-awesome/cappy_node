@@ -15,6 +15,14 @@ Two ComfyUI custom nodes for **MiniMax H3**:
 Everything quoted here was measured at 864x480, 49 frames, 20 steps,
 `res_multistep`/`simple`, seed 8421, BF16, on an RTX PRO 6000 Blackwell (sm_120).
 
+> **Keep this in mind: the cache smears fine detail in fast motion.** It works,
+> and 1.84x is real, but the speed comes from skipping the transformer work that
+> would have written fine texture. Where the frame is moving quickly and densely
+> detailed, that texture does not get written — in testing, books visibly
+> vanished off library shelves. Slower, simpler subjects such as a talking head
+> came through intact. Use it knowingly, and check your own content rather than
+> assuming either outcome.
+
 ## Read this first: your CUDA version is worth more than the cache settings
 
 ComfyUI's `comfy/quant_ops.py` disables comfy-kitchen's CUDA backend whenever
@@ -37,13 +45,21 @@ is the single most valuable thing in this repository — the regression is
 invisible, and it silently invalidated an entire round of this project's own
 benchmarking.
 
+Confirm what you are actually running with `python -c "import torch;
+print(torch.version.cuda)"`, and build any new virtualenv with `python -m venv`.
+A venv created by copying another one keeps the original's hardcoded paths in
+`bin/activate` and in the `pip` shebang, so activating it silently runs the
+interpreter you were trying to leave behind. That is exactly how the 10.5% went
+unnoticed here.
+
 ## What the cache costs, measured
 
 A reused step costs **0.025 s against 1.00 s** — the skipped stack really is
 about 40x cheaper. At `relative_threshold=0.10`, `max_consecutive_reuses=5`,
 9-10 of 20 stacks reuse, and DiT sampling drops from 19.2 s to 10.4 s.
 
-The cost is high-frequency detail, and **it depends heavily on your content**:
+The cost is that it **smears fine detail in fast motion**, and how much that
+matters depends heavily on your content:
 
 | Content | Result |
 | --- | --- |
