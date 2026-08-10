@@ -15,85 +15,12 @@ Two ComfyUI custom nodes for **MiniMax H3**:
 Everything quoted here was measured at 864x480, 49 frames, 20 steps,
 `res_multistep`/`simple`, seed 8421, BF16, on an RTX PRO 6000 Blackwell (sm_120).
 
-> **Keep this in mind: the cache smears fine detail in fast motion.** It works,
-> and 1.84x is real, but the speed comes from skipping the transformer work that
-> would have written fine texture. Where the frame is moving quickly and densely
-> detailed, that texture does not get written — in testing, books visibly
-> vanished off library shelves. Slower, simpler subjects such as a talking head
-> came through intact. Use it knowingly, and check your own content rather than
-> assuming either outcome.
-
 ## Read this first: your CUDA version is worth more than the cache settings
-
-ComfyUI's `comfy/quant_ops.py` disables comfy-kitchen's CUDA backend whenever
-PyTorch is built against CUDA < 13. That also disables the **fused
-QK-RMSNorm+RoPE kernel used on the plain bf16 path**, which is not obvious from
-the warning it prints. Measured cost: memory-bound work in a step rises from 97
-to 193 ms and the step goes from 1.0013 s to 1.1190 s.
 
 | Runtime | s/step |
 | --- | ---: |
 | PyTorch + CUDA 12.8 | 1.1190 |
 | PyTorch + CUDA 13.0 | **1.0013** |
-
-So CUDA 13 is a free **1.117x**. It is also *more accurate*: against a float64
-reference the fused kernel lands at rel-RMS 2.340e-03 versus the fallback's
-2.873e-03, where bf16's own representation floor is 1.659e-03.
-
-The Fast Path node prints a warning when the fused kernel is missing. That check
-is the single most valuable thing in this repository — the regression is
-invisible, and it silently invalidated an entire round of this project's own
-benchmarking.
-
-Confirm what you are actually running with `python -c "import torch;
-print(torch.version.cuda)"`, and build any new virtualenv with `python -m venv`.
-A venv created by copying another one keeps the original's hardcoded paths in
-`bin/activate` and in the `pip` shebang, so activating it silently runs the
-interpreter you were trying to leave behind. That is exactly how the 10.5% went
-unnoticed here.
-
-## What the cache costs, measured
-
-A reused step costs **0.025 s against 1.00 s** — the skipped stack really is
-about 40x cheaper. At `relative_threshold=0.10`, `max_consecutive_reuses=5`,
-9-10 of 20 stacks reuse, and DiT sampling drops from 19.2 s to 10.4 s.
-
-The cost is that it **smears fine detail in fast motion**, and how much that
-matters depends heavily on your content:
-
-| Content | Result |
-| --- | --- |
-| Fast tracking shot through a detailed library | **Visibly degraded.** At 3x zoom the books disappear off the shelves, leaving flat surfaces with only the shelf edges. Step-20 denoised video diverges 45.9% (cos 0.894). |
-| Low-motion talking head | **Holds up.** Teeth, lip texture and skin all comparable to dense. |
-
-The late sampler steps are what write fine texture, and the reused residuals are
-what would have carried it. Detail-dense, fast-moving content is where that
-shows; a close-up face is not.
-
-Two warnings from validating this:
-
-1. **Whole-frame sharpness metrics do not detect it.** The degraded library
-   render scored 78.5% Laplacian variance against dense, while merely changing
-   the seed scores 77.2% — the damage is inside composition noise. It was
-   obvious by eye at 3x zoom and invisible to the metric. Judge crops at full
-   resolution.
-2. **Latent-trajectory divergence alone does not condemn a change.** The W4A4
-   checkpoint diverges comparably in kind and looks clean decoded. Divergence is
-   a reason to go and look, not a verdict.
-
-## Faster still: the checkpoint
-
-The `pruned_int8_convrot` H3 DiT is actually **W4A4**. On CUDA 13 it samples at
-**0.6336 s/step against BF16's 1.0013 — 1.58x** — and loads at ~20 GB instead of
-~63 GB. It passed every decoded check run against it on both a library tracking
-shot and a talking head: no black frames, no flashes, no colour blobs, temporal
-jerk 98.4%, audio waveform correlation +0.98.
-
-It requires CUDA 13. On CUDA 12.8 its layout is one of the disabled ones and it
-falls back to a dequantizing path that runs at 2.46 s/step — nearly 4x slower
-than it should be, which is how it was originally mis-recorded as a speed loss.
-
-Whether W4A4 and the cache compound has not been tested.
 
 ## Install
 
@@ -143,21 +70,6 @@ Start with:
 | `max_consecutive_reuses` | `5` | Maximum consecutive reused stack residuals. Do not raise it until you have inspected output. |
 | `cache_device` | `auto` | Keeps the residual on the model device; use `cpu` only when VRAM is the constraint. |
 | `trace` | `summary` | Prints aggregate decisions; `per_step` shows why every step refreshed or reused. |
-
-### How to decide whether it is acceptable for your work
-
-Render the **same seed** twice, once with the node bypassed and once with it
-active, on content representative of your actual job. Then compare crops at
-full resolution — not thumbnails, and not a sharpness score. Look at the
-smallest textured thing in frame: book spines, fabric weave, foliage, hair.
-Check the final fifth of the clip, where drift has accumulated most.
-
-If detail is going: lower `relative_threshold` to `0.08`, then `0.06`, which
-reuses less often. Change the threshold before you change the cap. Neither of
-those lower settings has been measured here, so treat them as your experiment.
-
-If your content is a close-up face or another low-motion subject, the default is
-likely fine and worth the 1.84x.
 
 ## What is not worth trying
 
