@@ -160,10 +160,6 @@ def main() -> None:
                         help="Apply the approximate residual cache instead of the exact fast path.")
     parser.add_argument("--threshold", type=float, default=0.10)
     parser.add_argument("--cap", type=int, default=5)
-    parser.add_argument("--batch-adaln", action="store_true",
-                        help="Enable the AdaLN batching experiment (measured 1.00x; off by default).")
-    parser.add_argument("--verify-exact", action="store_true",
-                        help="Make the fast path assert its own bitwise equality as it runs.")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 
@@ -190,8 +186,7 @@ def main() -> None:
     if args.fast_path:
         from cappy_node.nodes import CappyMiniMaxH3FastPath
         model = CappyMiniMaxH3FastPath().patch(
-            model=model, batch_adaln=args.batch_adaln, cache_invariants=True,
-            verify_exact=args.verify_exact)[0]
+            model=model, cache_invariants=True)[0]
         print("[taps] CappyMiniMaxH3FastPath applied")
 
     recorder = TapRecorder(blocks, steps)

@@ -153,7 +153,7 @@ Measured and closed, so nobody spends the time again:
 | A better attention backend | 20.5% of a step. cuDNN has no execution plan for head_dim 64; memory-efficient attention is 2.2x slower than the flash kernel already in use. |
 | `torch.compile` / CUDA graphs | The GPU is **99.8% busy**. There is no host-side gap to recover. |
 | On-the-fly FP8 | 1.89x on the GEMM alone, but 1.55x once per-call activation quantization is counted, at rel-RMS 3.8e-02 — worse than W4A4 on both speed and accuracy. |
-| Batching AdaLN across steps | Isolated: 18x cheaper and bitwise equal. In the model: neither. Left in `fast_path.py`, disabled, with its measurements. |
+| Batching AdaLN across steps | Isolated: 18x cheaper and bitwise equal. In the model: neither — one bf16 last bit off the stock projection, and 1.00x even when forced through. Removed; see git history at `a0ba236`. |
 
 Still open: a fused modulated-RMSNorm kernel. 53 ms/step sits in
 `mul_`/`addcmul_`/RMSNorm and roughly 60% of it looks recoverable, worth ~3%,

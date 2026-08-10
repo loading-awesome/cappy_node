@@ -15,11 +15,10 @@ class CappyMiniMaxH3FastPath:
     DESCRIPTION = (
         "The safe option, and not the fast one: MiniMax H3 acceleration that "
         "refuses to change the output, measured at 1.00x. Use "
-        "CappyMiniMaxH3AudioAwareCache for actual speed. Reuses the "
-        "RoPE table and refined text embedding across steps, and can run every "
-        "sampler step's AdaLN projection as one GEMM per block. Each optimization "
-        "is checked against the stock result at runtime and reverted unless it is "
-        "bitwise equal, so enabling it is safe by construction.\n\n"
+        "CappyMiniMaxH3AudioAwareCache for actual speed. Reuses the RoPE table "
+        "and the refined text embedding across sampler steps, both of which "
+        "depend on the layout and prompt rather than the timestep, so reuse is "
+        "exact.\n\n"
         "Measured at 864x480x49/20 steps on an RTX PRO 6000 Blackwell: 1.00x. "
         "Dense GEMM (69% of a step) and flash attention (20.5%) are already at "
         "this hardware's ceiling, so a model patch has almost nothing left to "
@@ -34,19 +33,6 @@ class CappyMiniMaxH3FastPath:
         return {
             "required": {
                 "model": ("MODEL",),
-                "batch_adaln": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": (
-                        "Project every scheduled timestep's AdaLN in one GEMM per block, "
-                        "instead of one GEMM per step. OFF because it was measured not to "
-                        "work: in isolation the batched GEMM is 18x cheaper and bitwise "
-                        "equal, but inside the model it is neither. It disagrees with the "
-                        "stock projection by one bf16 last bit (mean_rel 1.887e-06), so the "
-                        "runtime gate reverts it, and forcing it through changed the "
-                        "trajectory while still measuring 1.00x. Left here, off, so the "
-                        "next person does not repeat the experiment."
-                    ),
-                }),
                 "cache_invariants": ("BOOLEAN", {
                     "default": True,
                     "tooltip": (
@@ -57,20 +43,11 @@ class CappyMiniMaxH3FastPath:
                         "under CFG, which evaluates each timestep twice. Untested there."
                     ),
                 }),
-                "verify_exact": ("BOOLEAN", {
-                    "default": False,
-                    "tooltip": (
-                        "Recompute each AdaLN projection the stock way and assert the batched "
-                        "result is bitwise equal. Costs more than it saves; use it once after "
-                        "a ComfyUI or driver update, not in production."
-                    ),
-                }),
             }
         }
 
-    def patch(self, model, batch_adaln, cache_invariants, verify_exact):
-        return (patch_fast_path(model=model, batch_adaln=batch_adaln,
-                                cache_invariants=cache_invariants, verify=verify_exact),)
+    def patch(self, model, cache_invariants):
+        return (patch_fast_path(model=model, cache_invariants=cache_invariants),)
 
 
 class CappyMiniMaxH3AudioAwareCache:

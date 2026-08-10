@@ -345,9 +345,6 @@ def cappy_h3_forward(self: minimax_model.MiniMaxH3Model, x: list[torch.Tensor], 
     if fast is not None:
         # Fixed by the packed layout, so constant for the whole render.
         rope_freqs = fast.rope_table((layout.signature, dtype, str(device)), build_rope)
-        fast.current_values = tuple(unique_t)
-        fast.prepare_schedule(self, dtype, device, float(sigma_v), shift_v, shift_a,
-                              vis_aug, aud_aug, has_vis_cond, has_aud_cond)
     else:
         rope_freqs = build_rope()
     replacements = transformer_options.get("patches_replace", {}).get("dit", {})
@@ -402,27 +399,7 @@ class FastPathScope:
             self.fast.reset()
 
 
-def _adaln_forward(fast: ExactFastPath, block_index: int, projection: Any) -> Callable[..., Any]:
-    """Serve this block's AdaLN chunks from the whole-schedule GEMM when possible."""
-    original = projection.forward
-
-    def forward(t_emb: torch.Tensor):
-        chunks = fast.adaln(block_index, projection, t_emb, getattr(fast, "current_values", ()))
-        if chunks is None:
-            return original(t_emb)
-        if fast.needs_check(block_index):
-            # Must call `original`, not the module: the module's forward is this
-            # wrapper, so going through it would recurse.
-            reference = original(t_emb)
-            if not fast.accept(block_index, chunks, reference):
-                return reference
-        return chunks
-
-    return forward
-
-
-def patch_fast_path(model: Any, batch_adaln: bool, cache_invariants: bool,
-                    verify: bool, allow_last_bit: bool = False) -> Any:
+def patch_fast_path(model: Any, cache_invariants: bool = True) -> Any:
     """Apply only the exact optimizations. Output must be bitwise unchanged."""
     patched_model = model.clone()
     diffusion_model = patched_model.model.diffusion_model
@@ -436,16 +413,10 @@ def patch_fast_path(model: Any, batch_adaln: bool, cache_invariants: bool,
         LOG.warning("[Cappy H3 Fast Path] fused QK-RMSNorm+RoPE kernel is NOT active: %s. "
                     "This costs far more than anything this node can win back.", detail)
 
-    fast = ExactFastPath(batch_adaln=batch_adaln, cache_invariants=cache_invariants,
-                         verify=verify, allow_last_bit=allow_last_bit)
+    fast = ExactFastPath(cache_invariants=cache_invariants)
     patched_model.add_object_patch("diffusion_model._forward",
                                    types.MethodType(cappy_h3_forward, diffusion_model))
     patched_model.add_object_patch("diffusion_model._cappy_fast_path", fast)
-    if batch_adaln:
-        for index, block in enumerate(diffusion_model.blocks):
-            patched_model.add_object_patch(
-                f"diffusion_model.blocks.{index}.adaln_proj.forward",
-                _adaln_forward(fast, index, block.adaln_proj))
     patched_model.add_wrapper(comfy.patcher_extension.WrappersMP.OUTER_SAMPLE,
                               FastPathScope(fast))
     return patched_model

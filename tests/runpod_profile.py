@@ -19,8 +19,7 @@ scopes are inert until the profiler window opens.
 Run the standard dense profile:
 
     cd /runpod-volume/ComfyUI
-    source venv-cu130/bin/activate
-    COMFY_DIR=/runpod-volume/ComfyUI python \
+    COMFY_DIR=/runpod-volume/ComfyUI ./venv-cu130/bin/python \
       custom_nodes/cappy_node/tests/runpod_profile.py \
       --report-dir /runpod-volume/profile_bf16_dense \
       --cond-cache /runpod-volume/cond_library_bf16.pt
