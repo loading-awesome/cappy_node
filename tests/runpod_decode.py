@@ -36,10 +36,14 @@ def main() -> None:
             os.path.join(COMFY, "models", "vae", "minimax_h3_video_vae_fp16.safetensors")),
         **video_vae_options,
     )
-    images = nodes.VAEDecode().decode(vae=vvae, samples=result)[0]
+    # Match ComfyUI's inference execution; retaining autograd activations can
+    # consume nearly the entire GPU on this transformer VAE.
+    with torch.inference_mode():
+        images = nodes.VAEDecode().decode(vae=vvae, samples=result)[0]
     avae = comfy.sd.VAE(sd=comfy.utils.load_torch_file(
         os.path.join(COMFY, "models", "vae", "minimax_h3_audio_vae_fp32.safetensors")))
-    audio = VAEDecodeAudio.execute(vae=avae, samples=result).result[0]
+    with torch.inference_mode():
+        audio = VAEDecodeAudio.execute(vae=avae, samples=result).result[0]
     # Comfy's video mux converts the waveform to NumPy; detach VAE output
     # because this standalone harness does not run inside the UI's no-grad path.
     audio = {**audio, "waveform": audio["waveform"].detach()}

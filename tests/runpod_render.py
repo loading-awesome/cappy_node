@@ -178,12 +178,16 @@ def main() -> None:
             os.path.join(COMFY, "models", "vae", "minimax_h3_video_vae_fp16.safetensors")),
         **video_vae_options,
     )
-    images = nodes.VAEDecode().decode(vae=vvae, samples=result)[0]
+    # ComfyUI's execution engine is inference-only. This standalone utility
+    # must make that explicit or PyTorch retains every VAE activation.
+    with torch.inference_mode():
+        images = nodes.VAEDecode().decode(vae=vvae, samples=result)[0]
     del vvae
     gc.collect()
     avae = comfy.sd.VAE(sd=comfy.utils.load_torch_file(
         os.path.join(COMFY, "models", "vae", "minimax_h3_audio_vae_fp32.safetensors")))
-    audio = VAEDecodeAudio.execute(vae=avae, samples=result).result[0]
+    with torch.inference_mode():
+        audio = VAEDecodeAudio.execute(vae=avae, samples=result).result[0]
     # This direct harness is outside ComfyUI's normal no-grad execution path.
     # The muxer converts the waveform to NumPy, which requires a detached tensor.
     audio = {**audio, "waveform": audio["waveform"].detach()}
