@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import gc
+import json
 import logging
 import os
 import sys
@@ -38,6 +39,7 @@ from comfy_extras.nodes_custom_sampler import (
     RandomNoise,
     SamplerCustomAdvanced,
 )
+import comfy_extras.nodes_custom_sampler as custom_sampler_nodes
 from comfy_extras.nodes_minimax_h3 import _empty_av_latent
 from cappy_node.nodes import CappyMiniMaxH3AudioAwareCache
 
@@ -52,6 +54,7 @@ PROMPT = (
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
+    parser.add_argument("--prompt", default=PROMPT)
     parser.add_argument("--cache", action="store_true")
     parser.add_argument("--weight-set", choices=("bf16", "pruned-int8"), default="bf16",
                         help="Matched Comfy-Org H3 pair to load. Keep both arms on the same set.")
@@ -63,6 +66,10 @@ def main() -> None:
     parser.add_argument("--steps", type=int, default=20)
     parser.add_argument("--seed", type=int, default=12345)
     parser.add_argument("--latent-out", help="Save CPU latents and exit without VAE decode.")
+    parser.add_argument("--trajectory-dir",
+                        help="Write CPU step-state and denoised latent taps for dense/cache comparison.")
+    parser.add_argument("--video-decode-device", choices=("cuda", "cpu"), default="cuda",
+                        help="Use CPU RAM for the video VAE when GPU decode would exceed VRAM.")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
     logging.getLogger().setLevel(logging.INFO)
@@ -84,9 +91,14 @@ def main() -> None:
     clip = comfy.sd.load_clip(ckpt_paths=[clip_path],
                               embedding_directory=folder_paths.get_folder_paths("embeddings"),
                               clip_type=comfy.sd.CLIPType.MINIMAX)
-    conditioning = clip.encode_from_tokens_scheduled(clip.tokenize(PROMPT))
+    conditioning = clip.encode_from_tokens_scheduled(clip.tokenize(args.prompt))
     del clip
     gc.collect()
+    # Encoding temporarily brings the 51 GB BF16 Qwen model onto CUDA. Move
+    # it back to its configured CPU offload location before admitting the 66 GB
+    # BF16 DiT; otherwise both models contend for the same 96 GB card.
+    comfy.model_management.unload_all_models()
+    torch.cuda.empty_cache()
 
     dit_path = os.path.join(COMFY, "models", "diffusion_models", dit_name)
     model = comfy.sd.load_diffusion_model(dit_path)
@@ -100,8 +112,40 @@ def main() -> None:
     sampler = KSamplerSelect.execute(sampler_name="res_multistep").result[0]
     sigmas = BasicScheduler.execute(model=model, scheduler="simple", steps=args.steps, denoise=1.0).result[0]
     guider = BasicGuider.execute(model=model, conditioning=conditioning).result[0]
-    result = SamplerCustomAdvanced.execute(noise=noise, guider=guider, sampler=sampler,
-                                           sigmas=sigmas, latent_image=latent).result[0]
+    trajectory_restore = None
+    if args.trajectory_dir:
+        os.makedirs(args.trajectory_dir, exist_ok=True)
+        original_prepare_callback = custom_sampler_nodes.latent_preview.prepare_callback
+
+        def to_cpu_parts(value):
+            if getattr(value, "is_nested", False):
+                return tuple(part.detach().cpu() for part in value.unbind())
+            return value.detach().cpu()
+
+        def tapped_prepare_callback(*callback_args, **callback_kwargs):
+            original_callback = original_prepare_callback(*callback_args, **callback_kwargs)
+
+            def callback(step, x0, x, total_steps):
+                original_callback(step, x0, x, total_steps)
+                torch.save(
+                    {"step": step + 1, "total_steps": total_steps,
+                     "state": to_cpu_parts(x), "denoised": to_cpu_parts(x0)},
+                    os.path.join(args.trajectory_dir, f"step_{step + 1:03d}.pt"),
+                )
+            return callback
+
+        custom_sampler_nodes.latent_preview.prepare_callback = tapped_prepare_callback
+        trajectory_restore = original_prepare_callback
+        with open(os.path.join(args.trajectory_dir, "run.json"), "w") as handle:
+            json.dump({"cache": args.cache, "weight_set": args.weight_set,
+                       "width": args.width, "height": args.height, "length": args.length,
+                       "steps": args.steps, "seed": args.seed, "prompt": args.prompt}, handle, indent=2)
+    try:
+        result = SamplerCustomAdvanced.execute(noise=noise, guider=guider, sampler=sampler,
+                                               sigmas=sigmas, latent_image=latent).result[0]
+    finally:
+        if trajectory_restore is not None:
+            custom_sampler_nodes.latent_preview.prepare_callback = trajectory_restore
     video_latent, audio_latent = result["samples"].unbind()
     assert torch.isfinite(video_latent).all() and torch.isfinite(audio_latent).all()
 
@@ -124,8 +168,16 @@ def main() -> None:
     comfy.model_management.unload_all_models()
     torch.cuda.empty_cache()
 
-    vvae = comfy.sd.VAE(sd=comfy.utils.load_torch_file(
-        os.path.join(COMFY, "models", "vae", "minimax_h3_video_vae_fp16.safetensors")))
+    video_vae_options = {}
+    if args.video_decode_device == "cpu":
+        # This preserves the VAE's weights and math while moving its large
+        # activation footprint to host RAM. It is intentionally slower.
+        video_vae_options = {"device": torch.device("cpu"), "dtype": torch.float32}
+    vvae = comfy.sd.VAE(
+        sd=comfy.utils.load_torch_file(
+            os.path.join(COMFY, "models", "vae", "minimax_h3_video_vae_fp16.safetensors")),
+        **video_vae_options,
+    )
     images = nodes.VAEDecode().decode(vae=vvae, samples=result)[0]
     del vvae
     gc.collect()

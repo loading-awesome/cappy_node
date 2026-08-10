@@ -25,10 +25,17 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--latent", required=True)
     parser.add_argument("--out", required=True)
+    parser.add_argument("--video-decode-device", choices=("cuda", "cpu"), default="cuda")
     args = parser.parse_args()
     result = torch.load(args.latent, map_location="cpu", weights_only=False)
-    vvae = comfy.sd.VAE(sd=comfy.utils.load_torch_file(
-        os.path.join(COMFY, "models", "vae", "minimax_h3_video_vae_fp16.safetensors")))
+    video_vae_options = {}
+    if args.video_decode_device == "cpu":
+        video_vae_options = {"device": torch.device("cpu"), "dtype": torch.float32}
+    vvae = comfy.sd.VAE(
+        sd=comfy.utils.load_torch_file(
+            os.path.join(COMFY, "models", "vae", "minimax_h3_video_vae_fp16.safetensors")),
+        **video_vae_options,
+    )
     images = nodes.VAEDecode().decode(vae=vvae, samples=result)[0]
     avae = comfy.sd.VAE(sd=comfy.utils.load_torch_file(
         os.path.join(COMFY, "models", "vae", "minimax_h3_audio_vae_fp32.safetensors")))
