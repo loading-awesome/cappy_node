@@ -4,13 +4,7 @@ Two ComfyUI custom nodes for **MiniMax H3**:
 
 - **Cappy MiniMax H3 Audio-Aware Cache** — the accelerator. Reuses the residual
   from transformer blocks 1..N when the model is stable. Measured **1.84x** on
-  DiT sampling. It is an approximation and it costs fine detail on some content;
-  the exact numbers are below so you can decide with them rather than around
-  them.
-- **Cappy MiniMax H3 Fast Path (exact)** — bitwise-identical optimizations only.
-  Measured **1.00x**, i.e. it does not currently make anything faster. It is
-  worth attaching anyway because it checks your runtime and warns about a 10.5%
-  regression that otherwise fails silently.
+  DiT processing speed.
 
 Everything quoted here was measured at 864x480, 49 frames, 20 steps,
 `res_multistep`/`simple`, seed 8421, BF16, on an RTX PRO 6000 Blackwell (sm_120).
