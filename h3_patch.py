@@ -25,6 +25,7 @@ import comfy.patcher_extension
 from comfy.ldm.minimax import model as minimax_model
 
 from .cache_policy import BranchState, decide
+from .fast_path import ExactFastPath, fused_attention_kernel_active
 
 
 LOG = logging.getLogger("cappy_h3_cache")
@@ -260,6 +261,7 @@ def cappy_h3_forward(self: minimax_model.MiniMaxH3Model, x: list[torch.Tensor], 
                      minimax_payload: dict[str, Any] | None = None, **kwargs: Any) -> list[torch.Tensor]:
     """ComfyUI's H3 forward with Cappy's model-patchable block-loop seam."""
     del kwargs
+    fast: ExactFastPath | None = getattr(self, "_cappy_fast_path", None)
     video_x, audio_x = x[0], x[1]
     orig_t, orig_h, orig_w = video_x.shape[2:5]
     video_x = comfy.ldm.common_dit.pad_to_patch_size(video_x, self.patch_size)
@@ -314,7 +316,12 @@ def cappy_h3_forward(self: minimax_model.MiniMaxH3Model, x: list[torch.Tensor], 
     video_embed, audio_embed = self.video_patch_proj(all_video_rows).to(dtype), self.audio_patch_proj(all_audio_rows).to(dtype)
     text_states = context[0]
     if text_states.shape[-1] != self.hidden_size:
-        text_states = self.token_refiner(self.condition_proj(text_states), transformer_options=transformer_options)
+        # Depends on the prompt, not the timestep, but the stock forward rebuilds
+        # it on every model evaluation.
+        def refine_text() -> torch.Tensor:
+            return self.token_refiner(self.condition_proj(text_states),
+                                      transformer_options=transformer_options)
+        text_states = fast.text_states(context, refine_text) if fast else refine_text()
     hidden_states = torch.empty(layout.seq_len, self.hidden_size, dtype=dtype, device=device)
     video_offset = audio_offset = 0
     for start, end, kind in layout.segments:
@@ -332,7 +339,17 @@ def cappy_h3_forward(self: minimax_model.MiniMaxH3Model, x: list[torch.Tensor], 
         timestep_embedding = torch.lerp(table[lower], table[lower + 1], (position - lower).unsqueeze(1))
     else:
         timestep_embedding = self.time_embedder(t_values).to(dtype)
-    rope_freqs = minimax_model.rope_rotation_table(self.rope_freqs(layout.position_ids, device), dtype)
+    def build_rope() -> torch.Tensor:
+        return minimax_model.rope_rotation_table(self.rope_freqs(layout.position_ids, device), dtype)
+
+    if fast is not None:
+        # Fixed by the packed layout, so constant for the whole render.
+        rope_freqs = fast.rope_table((layout.signature, dtype, str(device)), build_rope)
+        fast.current_values = tuple(unique_t)
+        fast.prepare_schedule(self, dtype, device, float(sigma_v), shift_v, shift_a,
+                              vis_aug, aud_aug, has_vis_cond, has_aud_cond)
+    else:
+        rope_freqs = build_rope()
     replacements = transformer_options.get("patches_replace", {}).get("dit", {})
     if ("block_loop", 0) in replacements:
         segments = tuple(layout.segments)
@@ -363,6 +380,75 @@ def cappy_h3_forward(self: minimax_model.MiniMaxH3Model, x: list[torch.Tensor], 
         slope_a = time_shift_slope(sigma_v, shift_v, shift_a).to(audio_out.dtype)
         audio_velocity = (-slope_a) * audio_out.to(audio_x.dtype)
     return [-video_out.to(video_x.dtype), audio_velocity]
+
+
+class FastPathScope:
+    """Hand the sigma schedule to the fast path and clear it between renders."""
+
+    def __init__(self, fast: ExactFastPath) -> None:
+        self.fast = fast
+
+    def __call__(self, sample_fn: Callable[..., Any], *args: Any, **kwargs: Any) -> Any:
+        sigmas = kwargs.get("sigmas")
+        if sigmas is None and len(args) > 3:
+            sigmas = args[3]
+        self.fast.reset()
+        if isinstance(sigmas, torch.Tensor) and sigmas.ndim == 1 and len(sigmas) >= 2:
+            self.fast.sigmas = sigmas.detach().to("cpu", torch.float64)
+        try:
+            return sample_fn(*args, **kwargs)
+        finally:
+            LOG.info("[Cappy H3 Fast Path] %s", self.fast.summary())
+            self.fast.reset()
+
+
+def _adaln_forward(fast: ExactFastPath, block_index: int, projection: Any) -> Callable[..., Any]:
+    """Serve this block's AdaLN chunks from the whole-schedule GEMM when possible."""
+    original = projection.forward
+
+    def forward(t_emb: torch.Tensor):
+        chunks = fast.adaln(block_index, projection, t_emb, getattr(fast, "current_values", ()))
+        if chunks is None:
+            return original(t_emb)
+        if fast.needs_check(block_index):
+            # Must call `original`, not the module: the module's forward is this
+            # wrapper, so going through it would recurse.
+            reference = original(t_emb)
+            if not fast.accept(block_index, chunks, reference):
+                return reference
+        return chunks
+
+    return forward
+
+
+def patch_fast_path(model: Any, batch_adaln: bool, cache_invariants: bool,
+                    verify: bool, allow_last_bit: bool = False) -> Any:
+    """Apply only the exact optimizations. Output must be bitwise unchanged."""
+    patched_model = model.clone()
+    diffusion_model = patched_model.model.diffusion_model
+    if not isinstance(diffusion_model, minimax_model.MiniMaxH3Model):
+        raise ValueError("Cappy H3 Fast Path requires a MiniMax H3 diffusion model; received "
+                         f"{diffusion_model.__class__.__name__}.")
+    active, detail = fused_attention_kernel_active()
+    if active:
+        LOG.info("[Cappy H3 Fast Path] fused QK-RMSNorm+RoPE kernel active (%s).", detail)
+    else:
+        LOG.warning("[Cappy H3 Fast Path] fused QK-RMSNorm+RoPE kernel is NOT active: %s. "
+                    "This costs far more than anything this node can win back.", detail)
+
+    fast = ExactFastPath(batch_adaln=batch_adaln, cache_invariants=cache_invariants,
+                         verify=verify, allow_last_bit=allow_last_bit)
+    patched_model.add_object_patch("diffusion_model._forward",
+                                   types.MethodType(cappy_h3_forward, diffusion_model))
+    patched_model.add_object_patch("diffusion_model._cappy_fast_path", fast)
+    if batch_adaln:
+        for index, block in enumerate(diffusion_model.blocks):
+            patched_model.add_object_patch(
+                f"diffusion_model.blocks.{index}.adaln_proj.forward",
+                _adaln_forward(fast, index, block.adaln_proj))
+    patched_model.add_wrapper(comfy.patcher_extension.WrappersMP.OUTER_SAMPLE,
+                              FastPathScope(fast))
+    return patched_model
 
 
 def patch_model(model: Any, threshold: float, max_consecutive_reuses: int,

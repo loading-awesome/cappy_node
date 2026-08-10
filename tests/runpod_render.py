@@ -51,6 +51,23 @@ PROMPT = (
 )
 
 
+def vram(stage: str, reset: bool = True) -> None:
+    """Report the CUDA high-water mark for the stage that just finished.
+
+    `max_memory_allocated` is tensor bytes; `max_memory_reserved` is what the
+    caching allocator actually held from the driver, which is the number that
+    decides whether a card is big enough. Peak is reset per stage because this
+    harness deliberately unloads each component before admitting the next, and
+    a single whole-run figure would hide which stage is the constraint.
+    """
+    peak_alloc = torch.cuda.max_memory_allocated() / 1024 ** 3
+    peak_reserved = torch.cuda.max_memory_reserved() / 1024 ** 3
+    print(f"CAPPY_VRAM stage={stage} peak_allocated={peak_alloc:.2f}GiB "
+          f"peak_reserved={peak_reserved:.2f}GiB")
+    if reset:
+        torch.cuda.reset_peak_memory_stats()
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--out", required=True)
@@ -58,6 +75,10 @@ def main() -> None:
     parser.add_argument("--cache", action="store_true")
     parser.add_argument("--weight-set", choices=("bf16", "pruned-int8"), default="bf16",
                         help="Matched Comfy-Org H3 pair to load. Keep both arms on the same set.")
+    parser.add_argument("--clip-weight-set", choices=("bf16", "pruned-int8"),
+                        help="Pin the text encoder independently of the DiT. Use this to judge a "
+                             "DiT-only change: holding conditioning fixed removes the encoder as a "
+                             "second variable. Defaults to --weight-set (the matched pair).")
     parser.add_argument("--threshold", type=float, default=0.10)
     parser.add_argument("--cap", type=int, default=5)
     parser.add_argument("--width", type=int, default=864)
@@ -88,7 +109,8 @@ def main() -> None:
             "minimax_h3_fl2va_pruned_int8_convrot.safetensors",
         ),
     }
-    clip_name, dit_name = weights[args.weight_set]
+    clip_name = weights[args.clip_weight_set or args.weight_set][0]
+    dit_name = weights[args.weight_set][1]
     clip_path = os.path.join(COMFY, "models", "text_encoders", clip_name)
     clip = comfy.sd.load_clip(ckpt_paths=[clip_path],
                               embedding_directory=folder_paths.get_folder_paths("embeddings"),
@@ -101,6 +123,7 @@ def main() -> None:
     # BF16 DiT; otherwise both models contend for the same 96 GB card.
     comfy.model_management.unload_all_models()
     torch.cuda.empty_cache()
+    vram("text_encoder")
 
     dit_path = os.path.join(COMFY, "models", "diffusion_models", dit_name)
     model = comfy.sd.load_diffusion_model(dit_path)
@@ -151,6 +174,7 @@ def main() -> None:
     finally:
         if trajectory_restore is not None:
             custom_sampler_nodes.latent_preview.prepare_callback = trajectory_restore
+    vram("dit_sampling")
     video_latent, audio_latent = result["samples"].unbind()
     assert torch.isfinite(video_latent).all() and torch.isfinite(audio_latent).all()
 
@@ -187,6 +211,7 @@ def main() -> None:
     # must make that explicit or PyTorch retains every VAE activation.
     with torch.inference_mode():
         images = nodes.VAEDecode().decode(vae=vvae, samples=result)[0]
+    vram("video_vae_decode")
     del vvae
     gc.collect()
     avae = comfy.sd.VAE(sd=comfy.utils.load_torch_file(
@@ -195,6 +220,7 @@ def main() -> None:
         audio = VAEDecodeAudio.execute(vae=avae, samples=result).result[0]
     # This direct harness is outside ComfyUI's normal no-grad execution path.
     # The muxer converts the waveform to NumPy, which requires a detached tensor.
+    vram("audio_vae_decode")
     audio = {**audio, "waveform": audio["waveform"].detach()}
     VideoFromComponents(VideoComponents(images=images.float().cpu(), audio=audio,
                                         frame_rate=Fraction(24))).save_to(
