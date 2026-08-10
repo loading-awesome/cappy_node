@@ -14,8 +14,8 @@ class CappyMiniMaxH3AudioAwareCache:
     FUNCTION = "patch"
     DESCRIPTION = (
         "Approximate MiniMax H3 acceleration. Runs block 0 on every step, "
-        "reuses the remaining-stack residual only when both the whole sequence "
-        "and generated-audio probe are stable, and always refreshes the last step."
+        "reuses the remaining-stack residual only when whole-sequence, generated-video, "
+        "and generated-audio probes are stable, and always refreshes the last step."
     )
 
     @classmethod
@@ -49,12 +49,13 @@ class CappyMiniMaxH3AudioAwareCache:
         }
 
     def patch(self, model, relative_threshold, max_consecutive_reuses,
-              cache_device, trace):
+              cache_device, trace, diagnostic_group_size=None, diagnostic_path=None):
         return (patch_model(
             model=model,
             threshold=relative_threshold,
             max_consecutive_reuses=max_consecutive_reuses,
             cache_device=cache_device,
             trace=trace,
+            diagnostic_group_size=diagnostic_group_size,
+            diagnostic_path=diagnostic_path,
         ),)
-

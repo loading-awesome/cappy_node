@@ -68,6 +68,8 @@ def main() -> None:
     parser.add_argument("--latent-out", help="Save CPU latents and exit without VAE decode.")
     parser.add_argument("--trajectory-dir",
                         help="Write CPU step-state and denoised latent taps for dense/cache comparison.")
+    parser.add_argument("--group-taps", type=int,
+                        help="Teacher-force dense block groups of this size and record their step changes.")
     parser.add_argument("--video-decode-device", choices=("cuda", "cpu"), default="cuda",
                         help="Use CPU RAM for the video VAE when GPU decode would exceed VRAM.")
     args = parser.parse_args()
@@ -102,10 +104,13 @@ def main() -> None:
 
     dit_path = os.path.join(COMFY, "models", "diffusion_models", dit_name)
     model = comfy.sd.load_diffusion_model(dit_path)
-    if args.cache:
+    if args.cache or args.group_taps:
         model = CappyMiniMaxH3AudioAwareCache().patch(
             model=model, relative_threshold=args.threshold,
             max_consecutive_reuses=args.cap, cache_device="auto", trace="per_step",
+            diagnostic_group_size=args.group_taps,
+            diagnostic_path=(os.path.join(args.trajectory_dir, "group_changes.json")
+                             if args.group_taps and args.trajectory_dir else None),
         )[0]
     latent, _ = _empty_av_latent(args.width, args.height, args.length)
     noise = RandomNoise.execute(noise_seed=args.seed).result[0]

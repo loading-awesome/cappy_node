@@ -2,8 +2,8 @@
 
 An experimental ComfyUI custom node for **MiniMax H3** that speeds sampling by
 reusing the residual from transformer blocks 1 through N when the model is
-stable. It is designed around video with spoken audio: audio has an independent
-veto, so a visually quiet step cannot reuse stale audio features.
+stable. It is designed around video with spoken audio: whole-sequence, video,
+and audio changes each have an independent veto.
 
 This is an approximation. It can materially reduce render time, but it is not
 a quality-neutral kernel optimization. Validate it against dense renders for
@@ -13,19 +13,22 @@ your model, prompt, resolution, and audio before using it in production.
 
 Most H3 cache nodes decide before entering the transformer stack. Cappy always
 runs **block 0**, then measures the relative change of its residual against the
-previous step. It reuses the full-stack residual only when both conditions hold:
+previous step. It reuses the full-stack residual only when all conditions hold:
 
 1. The complete token sequence is below the threshold.
-2. The generated-audio token range is also below the threshold.
+2. The generated-video token range is also below the threshold.
+3. The generated-audio token range is also below the threshold.
 
 The first and last sampler steps are always full evaluations. A consecutive
 reuse cap forces periodic refreshes, limiting residual age and reducing the
 warping seen with larger block-evaluation intervals.
 
-The settings are based on an Apple Silicon H3 investigation, where a cross-step
-cache was the only large, practical DiT speedup. The policy was tested at
-`relative_threshold=0.10` and `max_consecutive_reuses=5`. These values are a
-starting point, **not a promise of equivalent speed or output quality on CUDA**.
+The original settings came from an Apple Silicon H3 investigation. NVIDIA
+trajectory testing showed that the prior whole-sequence-plus-audio policy could
+reuse a step whose video tokens had already changed materially. This package
+now blocks that case, which makes it safer but can also eliminate much of the
+original speedup. Treat all settings as experiments, **not a promise of
+equivalent speed or output quality on CUDA**.
 
 ## Install
 
@@ -75,7 +78,7 @@ Start with:
 
 | Setting | Start value | Meaning |
 | --- | ---: | --- |
-| `relative_threshold` | `0.10` | Reuse only below this relative block-0 change. Lower is safer and slower. |
+| `relative_threshold` | `0.10` | Reuse only when whole/video/audio block-0 changes are all below this value. Lower is safer and slower. |
 | `max_consecutive_reuses` | `5` | Maximum consecutive reused stack residuals. Do not raise it until you have inspected output. |
 | `cache_device` | `auto` | Keeps residual on the model device; use `cpu` only when VRAM is the constraint. |
 | `trace` | `summary` | Prints aggregate decisions; `per_step` shows why every step refreshed or reused. |
@@ -88,10 +91,9 @@ and the final 15–20% of the render. If any look worse, lower the threshold
 ### Safe tuning order
 
 Keep `max_consecutive_reuses=5` while finding a threshold that preserves your
-output. If you need more quality, lower `relative_threshold`. If dense and
-cached output remain coherent over several representative clips and the trace
-shows mostly `consecutiveCap`, you may test a cap of `6`—one value at a time.
-Do not treat a single pretty clip as validation.
+output. If you need more quality, lower `relative_threshold`. Do not increase
+the cap until dense-vs-cached comparisons across several representative clips
+remain acceptable. Do not treat a single pretty clip as validation.
 
 ## Reading the console trace
 
@@ -99,6 +101,7 @@ Do not treat a single pretty clip as validation.
 refresh reasons are:
 
 - `audioAboveThreshold`: audio changed enough to require fresh transformer work.
+- `videoAboveThreshold`: video changed enough to require fresh transformer work.
 - `wholeSequenceAboveThreshold`: broader model state changed enough to refresh.
 - `consecutiveCap`: a deliberately scheduled refresh after the maximum reuse age.
 - `cooldown`: final step is always full to avoid finishing on stale features.
@@ -137,5 +140,5 @@ by silveroxides (AGPL-3.0), whose H3 cache notes an earlier GPL-3.0 cache
 heuristic by lihaoyun6. See [NOTICE](NOTICE) and [LICENSE](LICENSE).
 
 The Cappy policy differs materially: it runs block 0 every step, measures that
-residual rather than a pre-stack feature signature, uses whole-sequence plus
-audio-specific gates, and forces a final full refresh.
+residual rather than a pre-stack feature signature, uses whole-sequence,
+video-specific, and audio-specific gates, and forces a final full refresh.

@@ -42,7 +42,7 @@ def decide(
     video_change: float | None,
     have_matching_residual: bool,
 ) -> CacheDecision:
-    """Choose full/reuse after block 0; audio is an independent veto."""
+    """Choose full/reuse after block 0; every generated stream vetoes reuse."""
 
     before = state.consecutive_reuses
     if state.step_index == 0:
@@ -55,7 +55,7 @@ def decide(
         decision = CacheDecision(False, "noCachedResidual", whole_change, audio_change,
                                  video_change, before)
     elif not all(value is not None and isfinite(value)
-                 for value in (whole_change, audio_change)):
+                 for value in (whole_change, audio_change, video_change)):
         decision = CacheDecision(False, "nonFinite", whole_change, audio_change,
                                  video_change, before)
     elif whole_change >= threshold:
@@ -63,6 +63,9 @@ def decide(
                                  audio_change, video_change, before)
     elif audio_change >= threshold:
         decision = CacheDecision(False, "audioAboveThreshold", whole_change,
+                                 audio_change, video_change, before)
+    elif video_change >= threshold:
+        decision = CacheDecision(False, "videoAboveThreshold", whole_change,
                                  audio_change, video_change, before)
     elif before >= max_consecutive_reuses:
         decision = CacheDecision(False, "consecutiveCap", whole_change, audio_change,

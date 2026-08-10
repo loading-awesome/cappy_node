@@ -1,14 +1,16 @@
 """ComfyUI integration for Cappy's audio-aware MiniMax H3 residual cache.
 
 This module mirrors the current ComfyUI H3 forward only to expose a safe block
-loop boundary.  The cache itself is deliberately conservative: block 0 always
-runs, and blocks 1..N are reused only after whole-sequence *and* audio probes
-pass their threshold.
+loop boundary. The cache itself is deliberately conservative: block 0 always
+runs, and blocks 1..N are reused only after whole-sequence, video, and audio
+probes pass their threshold.
 """
 
 from __future__ import annotations
 
 import logging
+import json
+import os
 import types
 from collections import Counter
 from collections.abc import Callable
@@ -54,17 +56,24 @@ class AudioAwareFirstBlockCache:
     """Cache a complete stack residual, using block 0 as a fresh probe."""
 
     def __init__(self, threshold: float, max_consecutive_reuses: int,
-                 cache_device: str, trace: str) -> None:
+                 cache_device: str, trace: str, diagnostic_group_size: int | None = None,
+                 diagnostic_path: str | None = None) -> None:
         self.threshold = threshold
         self.max_consecutive_reuses = max_consecutive_reuses
         self.cache_device = cache_device
         self.trace = trace
         self.total_steps = 1
         self.branches: dict[str, BranchState] = {}
+        self.diagnostic_group_size = diagnostic_group_size
+        self.diagnostic_path = diagnostic_path
+        self._previous_group_residuals: dict[tuple[str, int], torch.Tensor] = {}
+        self._group_records: list[dict[str, Any]] = []
 
     def begin(self, total_steps: int) -> None:
         self.total_steps = max(1, total_steps)
         self.branches = {}
+        self._previous_group_residuals = {}
+        self._group_records = []
 
     def finish(self) -> None:
         decisions = [d for state in self.branches.values() for d in state.decisions]
@@ -77,6 +86,25 @@ class AudioAwareFirstBlockCache:
                 ", ".join(f"{reason}={count}" for reason, count in sorted(reasons.items())),
             )
         self.branches = {}
+        if self.diagnostic_path:
+            os.makedirs(os.path.dirname(os.path.abspath(self.diagnostic_path)), exist_ok=True)
+            with open(self.diagnostic_path, "w") as handle:
+                json.dump(self._group_records, handle, indent=2)
+
+    def _record_group(self, branch_key: str, step: int, start: int, end: int,
+                      residual: torch.Tensor, segments: tuple[tuple[int, int, str], ...]) -> None:
+        """Record teacher-forced block-group stability while retaining dense output."""
+        key = (branch_key, start)
+        previous = self._previous_group_residuals.get(key)
+        audio_range = _first_range(segments, "audio")
+        video_range = _first_range(segments, "video")
+        self._group_records.append({
+            "branch": branch_key, "step": step, "start": start, "end": end,
+            "whole_change": _relative_l1(residual, previous),
+            "audio_change": _relative_l1(residual, previous, audio_range),
+            "video_change": _relative_l1(residual, previous, video_range),
+        })
+        self._previous_group_residuals[key] = residual.detach().clone()
 
     @staticmethod
     def _branch_key(transformer_options: dict[str, Any]) -> str:
@@ -139,6 +167,17 @@ class AudioAwareFirstBlockCache:
         after_first = run_h3_blocks(model, hidden_states.clone(), args["t_emb"], args["mod_segments"],
                                     args["rope_freqs"], transformer_options, start=0, end=1)
         probe = after_first - input_snapshot
+        if self.diagnostic_group_size:
+            self._record_group(branch_key, state.step_index + 1, 0, 1, probe, segments)
+            output = after_first
+            for start in range(1, args["block_count"], self.diagnostic_group_size):
+                end = min(start + self.diagnostic_group_size, args["block_count"])
+                group_input = output.detach().clone()
+                output = run_h3_blocks(model, output, args["t_emb"], args["mod_segments"],
+                                        args["rope_freqs"], transformer_options, start=start, end=end)
+                self._record_group(branch_key, state.step_index + 1, start, end,
+                                   output - group_input, segments)
+            return {"img": output}
         audio_range = _first_range(segments, "audio")
         video_range = _first_range(segments, "video")
         whole_change = _relative_l1(probe, state.previous_probe)
@@ -327,7 +366,8 @@ def cappy_h3_forward(self: minimax_model.MiniMaxH3Model, x: list[torch.Tensor], 
 
 
 def patch_model(model: Any, threshold: float, max_consecutive_reuses: int,
-                cache_device: str, trace: str) -> Any:
+                cache_device: str, trace: str, diagnostic_group_size: int | None = None,
+                diagnostic_path: str | None = None) -> Any:
     """Clone and patch a MiniMax H3 MODEL; other model types fail before sampling."""
     if threshold <= 0:
         raise ValueError("Cappy H3 Cache requires a threshold greater than zero.")
@@ -336,7 +376,8 @@ def patch_model(model: Any, threshold: float, max_consecutive_reuses: int,
     if not isinstance(diffusion_model, minimax_model.MiniMaxH3Model):
         raise ValueError("Cappy H3 Cache requires a MiniMax H3 diffusion model; received "
                          f"{diffusion_model.__class__.__name__}.")
-    cache = AudioAwareFirstBlockCache(threshold, max_consecutive_reuses, cache_device, trace)
+    cache = AudioAwareFirstBlockCache(threshold, max_consecutive_reuses, cache_device, trace,
+                                      diagnostic_group_size, diagnostic_path)
     patched_model.add_object_patch("diffusion_model._forward", types.MethodType(cappy_h3_forward, diffusion_model))
     patched_model.set_model_patch_replace(cache, "dit", "block_loop", 0)
     patched_model.add_wrapper(comfy.patcher_extension.WrappersMP.OUTER_SAMPLE, SamplingScope(cache))
